@@ -18,6 +18,9 @@ Default custom nodes:
   [ComfyUI-Impact-Subpack](https://github.com/ltdrdata/ComfyUI-Impact-Subpack)
 - [ComfyUI_essentials](https://github.com/cubiq/ComfyUI_essentials)
 - [ComfyUI-VideoHelperSuite](https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)
+- [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use)
+- [ComfyUI-Lora-Manager](https://github.com/willmiao/ComfyUI-Lora-Manager)
+- [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts)
 - [ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL) — QwenVL Prompt
   Enhancer nodes (Qwen2.5-VL / Qwen3-VL, transformers + GGUF); models
   auto-download to `models/LLM/` on first use
