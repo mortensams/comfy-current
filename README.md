@@ -51,30 +51,33 @@ Set the pod env var `EVERGREEN_SKIP_UPDATE=1` to boot without updating.
 
 ## Setup
 
-1. Push this repo to GitHub.
-2. Add repo secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
-   (a Docker Hub access token with write scope).
-3. Run the **Build evergreen ComfyUI image** workflow (it also runs weekly
-   and on pushes that touch the image inputs). It publishes
-   `<user>/comfyui-evergreen:cuda13.0` and `:latest`.
-4. In RunPod, duplicate the official **ComfyUI (CUDA 13)** template and
-   change only the container image to `<user>/comfyui-evergreen:cuda13.0`,
-   or create a template from scratch:
-   - Container image: `<user>/comfyui-evergreen:cuda13.0`
+1. Push this repo to GitHub. The **Build evergreen ComfyUI image** workflow
+   publishes to GHCR using the built-in `GITHUB_TOKEN` — no secrets needed.
+   It runs weekly, on manual dispatch, and on pushes that touch the image
+   inputs, producing `ghcr.io/mortensams/comfy-current:cuda13.0` and
+   `:latest`.
+2. After the first push, make the package public so RunPod can pull it
+   without credentials: GitHub → your profile → Packages →
+   `comfy-current` → Package settings → Change visibility → Public.
+   (Alternatively keep it private and add a registry credential in RunPod
+   with a GitHub PAT that has `read:packages`.)
+3. In RunPod, duplicate the official **ComfyUI (CUDA 13)** template and
+   change only the container image, or create a template from scratch:
+   - Container image: `ghcr.io/mortensams/comfy-current:cuda13.0`
    - Volume mount path: `/workspace` (attach your network volume)
    - HTTP ports: `8188` (ComfyUI), `8888` (Jupyter), `8080` (FileBrowser)
    - TCP port: `22` (SSH)
    - Optional env: `JUPYTER_PASSWORD`, `FILEBROWSER_PASSWORD`,
      `EVERGREEN_SKIP_UPDATE`
-5. Deploy a pod (CUDA 13 targets Blackwell / RTX 5090-class GPUs). The first
+4. Deploy a pod (CUDA 13 targets Blackwell / RTX 5090-class GPUs). The first
    boot provisions the volume; every restart after that lands on the latest
    ComfyUI.
 
 ## Local build
 
 ```bash
-docker build -t youruser/comfyui-evergreen:cuda13.0 .
-docker push youruser/comfyui-evergreen:cuda13.0
+docker build -t ghcr.io/mortensams/comfy-current:cuda13.0 .
+docker push ghcr.io/mortensams/comfy-current:cuda13.0
 ```
 
 Use `--build-arg BASE_IMAGE=runpod/comfyui:cuda12.8` for a CUDA 12.8 variant
