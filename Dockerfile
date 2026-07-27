@@ -15,6 +15,8 @@ COPY default-nodes.txt /opt/default-nodes.txt
 # boot-time wrapper retries them on the volume.
 RUN set -e; \
     export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt; \
+    export COMFYUI_PATH=/opt/comfyui-baked; \
+    touch /opt/comfyui-baked/custom_nodes/skip_download_model; \
     while IFS= read -r repo; do \
         repo="${repo%%#*}"; repo="$(echo "$repo" | xargs)"; \
         if [ -z "$repo" ]; then continue; fi; \
@@ -28,7 +30,12 @@ RUN set -e; \
             python3.12 -m pip install --no-cache-dir -r "$dir/requirements.txt" \
                 || echo "WARNING: deps failed for $name (retried at boot)"; \
         fi; \
-    done < /opt/default-nodes.txt
+        if [ -f "$dir/install.py" ]; then \
+            (cd "$dir" && python3.12 install.py) \
+                || echo "WARNING: install.py failed for $name (retried at boot)"; \
+        fi; \
+    done < /opt/default-nodes.txt; \
+    rm -f /opt/comfyui-baked/custom_nodes/skip_download_model
 
 COPY start-evergreen.sh /start-evergreen.sh
 RUN chmod +x /start-evergreen.sh

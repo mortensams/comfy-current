@@ -8,3 +8,5 @@ https://github.com/ltdrdata/ComfyUI-Impact-Subpack
 https://github.com/cubiq/ComfyUI_essentials
 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
 https://github.com/1038lab/ComfyUI-QwenVL
+https://github.com/yolain/ComfyUI-Easy-Use
+https://github.com/willmiao/ComfyUI-Lora-Manager

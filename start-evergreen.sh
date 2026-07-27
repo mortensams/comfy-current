@@ -104,6 +104,13 @@ if [[ -f "$NODES_FILE" ]]; then
             if [[ -f "$dir/requirements.txt" ]]; then
                 python -m pip install -r "$dir/requirements.txt"
             fi
+
+            # Manager-style install script (Impact Pack etc. need this to
+            # finish setup: config files, model downloads, dep checks)
+            if [[ -f "$dir/install.py" ]]; then
+                (cd "$dir" && COMFYUI_PATH="$COMFYUI_DIR" python install.py) \
+                    || log "WARNING: install.py failed for $name"
+            fi
         ) || log "WARNING: sync failed for $name — continuing"
     done < "$NODES_FILE"
 else
