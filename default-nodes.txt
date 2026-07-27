@@ -1,0 +1,10 @@
+# Custom nodes baked into the image and kept up to date on every pod boot.
+# One git URL per line. Lines starting with # are ignored.
+# These are force-updated to the upstream default branch on boot — don't
+# hand-edit code inside these node folders on the volume.
+https://github.com/rgthree/rgthree-comfy
+https://github.com/ltdrdata/ComfyUI-Impact-Pack
+https://github.com/ltdrdata/ComfyUI-Impact-Subpack
+https://github.com/cubiq/ComfyUI_essentials
+https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
+https://github.com/1038lab/ComfyUI-QwenVL
