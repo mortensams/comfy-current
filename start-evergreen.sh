@@ -101,9 +101,7 @@ if [[ -f "$NODES_FILE" ]]; then
                 exit 0
             fi
 
-            if [[ -f "$dir/requirements.txt" ]]; then
-                python -m pip install -r "$dir/requirements.txt"
-            fi
+            /usr/local/bin/install-node-deps.sh "$dir"
 
             # Manager-style install script (Impact Pack etc. need this to
             # finish setup: config files, model downloads, dep checks)

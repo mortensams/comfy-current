@@ -6,6 +6,8 @@ ARG BASE_IMAGE=runpod/comfyui:cuda13.0
 FROM ${BASE_IMAGE}
 
 COPY default-nodes.txt /opt/default-nodes.txt
+COPY install-node-deps.sh /usr/local/bin/install-node-deps.sh
+RUN chmod +x /usr/local/bin/install-node-deps.sh
 
 # Bake the default custom nodes into /opt/comfyui-baked so they are present
 # from the very first boot (RunPod's /start.sh copies that directory to the
@@ -26,10 +28,8 @@ RUN set -e; \
             echo "Baking $name"; \
             git clone --depth=1 "$repo" "$dir"; \
         fi; \
-        if [ -f "$dir/requirements.txt" ]; then \
-            python3.12 -m pip install --no-cache-dir -r "$dir/requirements.txt" \
-                || echo "WARNING: deps failed for $name (retried at boot)"; \
-        fi; \
+        install-node-deps.sh "$dir" \
+            || echo "WARNING: deps failed for $name (retried at boot)"; \
         if [ -f "$dir/install.py" ]; then \
             (cd "$dir" && python3.12 install.py) \
                 || echo "WARNING: install.py failed for $name (retried at boot)"; \
