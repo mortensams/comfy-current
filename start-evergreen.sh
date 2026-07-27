@@ -64,6 +64,7 @@ log "============================================="
     git fetch --depth=1 origin master
     git rev-parse HEAD > "$ROLLBACK_FILE"
     git checkout -f -B master origin/master
+    echo "[evergreen] Syncing ComfyUI requirements (can take a few minutes when frontend/docs packages changed)"
     python -m pip install -r requirements.txt
 ) || log "WARNING: ComfyUI core update failed — starting the existing version"
 

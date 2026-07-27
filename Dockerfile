@@ -37,6 +37,16 @@ RUN set -e; \
     done < /opt/default-nodes.txt; \
     rm -f /opt/comfyui-baked/custom_nodes/skip_download_model
 
+# Pre-install latest master's requirements into system site-packages so the
+# boot-time sync on the (slow, network-volume) venv is a no-op for any pin
+# already covered by this week's build. The heavyweight offenders are
+# comfyui-frontend-package and comfyui-embedded-docs — thousands of small
+# files that take minutes to install on network storage.
+RUN export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt && \
+    git clone --depth=1 https://github.com/comfyanonymous/ComfyUI.git /tmp/comfyui-latest && \
+    python3.12 -m pip install --no-cache-dir -r /tmp/comfyui-latest/requirements.txt && \
+    rm -rf /tmp/comfyui-latest
+
 COPY start-evergreen.sh /start-evergreen.sh
 RUN chmod +x /start-evergreen.sh
 
