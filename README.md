@@ -21,9 +21,10 @@ Default custom nodes:
 - [ComfyUI-Easy-Use](https://github.com/yolain/ComfyUI-Easy-Use)
 - [ComfyUI-Lora-Manager](https://github.com/willmiao/ComfyUI-Lora-Manager)
 - [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts)
-- [ComfyUI-QwenVL](https://github.com/1038lab/ComfyUI-QwenVL) — QwenVL Prompt
-  Enhancer nodes (Qwen2.5-VL / Qwen3-VL, transformers + GGUF); models
-  auto-download to `models/LLM/` on first use
+- [ComfyUI-QwenVL-Mod](https://github.com/huchukato/ComfyUI-QwenVL-Mod) —
+  QwenVL Prompt Enhancer nodes (Qwen2.5-VL / Qwen3-VL, transformers + GGUF),
+  including the Unredacted-MAX model variants; models auto-download on
+  first use
 
 Add or remove nodes by editing `default-nodes.txt` (one git URL per line).
 
