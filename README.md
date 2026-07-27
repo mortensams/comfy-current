@@ -46,6 +46,12 @@ to `/workspace/runpod-slim/comfyui-previous-commit.txt` for manual rollback.
 
 Set the pod env var `EVERGREEN_SKIP_UPDATE=1` to boot without updating.
 
+Because SSH/Jupyter only start after the update pass, every phase runs
+under a hard timeout so a slow network volume can never leave the pod
+unreachable: `EVERGREEN_UPDATE_TIMEOUT` (core update, default 900s) and
+`EVERGREEN_NODE_TIMEOUT` (per custom node, default 600s). A timed-out
+phase is skipped with a warning and retried on the next boot.
+
 > Note: nodes in `default-nodes.txt` are **force-updated** (local changes
 > discarded). Nodes you install yourself via ComfyUI-Manager are left alone.
 
