@@ -23,6 +23,9 @@
 #   EVERGREEN_SKIP_UPDATE=1  boot whatever is on the volume, untouched
 #   EVERGREEN_INSTALL_DEPS   changed (default) | always | never
 #   EVERGREEN_MODELS_DIR     where models live; 'none' keeps them local
+#   EVERGREEN_MIGRATE_MODELS auto (default) | always | never
+#   EVERGREEN_MIGRATE_LIMIT_MB  auto-migrate ceiling, default 5120
+#   EVERGREEN_MODELS_WAIT    seconds to wait for the mount, default 20
 
 COMFYUI_DIR=/workspace/runpod-slim/ComfyUI
 VENV_DIR="$COMFYUI_DIR/.venv-cu128"
@@ -33,6 +36,9 @@ ROLLBACK_FILE=/workspace/runpod-slim/comfyui-previous-commit.txt
 STATE_DIR=/workspace/runpod-slim/.evergreen-state
 BUILD_ID_FILE=/opt/evergreen-build-id
 MODELS_TARGET="${EVERGREEN_MODELS_DIR:-/workspace-global/models}"
+MIGRATE_MODE="${EVERGREEN_MIGRATE_MODELS:-auto}"
+MIGRATE_LIMIT_MB="${EVERGREEN_MIGRATE_LIMIT_MB:-5120}"
+MODELS_WAIT="${EVERGREEN_MODELS_WAIT:-20}"
 
 log() { echo "[evergreen] $*"; }
 
@@ -57,9 +63,19 @@ hand_off() {
 
 prepare_models_target() {
     [[ -n "$MODELS_TARGET" && "$MODELS_TARGET" != "none" ]] || return 1
+
     # The mount point itself must already exist; mkdir would otherwise
-    # happily create the "global volume" on the local disk.
-    [[ -d "$(dirname "$MODELS_TARGET")" ]] || return 1
+    # happily create the "global volume" on the local disk. The mount can
+    # lag container start, so give it a moment rather than silently
+    # falling back to local models for the whole session.
+    local mount_point waited=0
+    mount_point="$(dirname "$MODELS_TARGET")"
+    while [[ ! -d "$mount_point" && "$waited" -lt "$MODELS_WAIT" ]]; do
+        [[ "$waited" -eq 0 ]] && log "Waiting up to ${MODELS_WAIT}s for $mount_point to mount"
+        sleep 1
+        waited=$((waited + 1))
+    done
+    [[ -d "$mount_point" ]] || return 1
     mkdir -p "$MODELS_TARGET" 2>/dev/null || return 1
 
     # Seed an empty volume with the configs and put_*_here placeholders the
@@ -71,15 +87,55 @@ prepare_models_target() {
     fi
 }
 
-# True when $1 holds nothing the image did not ship, and so can be replaced
-# by the symlink. Anything else is the user's own download -- possibly
-# hundreds of GB, far too much to migrate inside the boot timeout.
-models_dir_is_pristine() {
-    local dir="$1" f rel
+# Move an existing local models tree onto the global volume so the symlink
+# can take over. Custom nodes populate models/ on the very first boot --
+# Impact Pack's install.py alone pulls ~500 MB of SAM and ultralytics
+# weights -- so refusing to touch a non-empty tree would mean the link
+# never gets made in practice. Large trees are still refused: copying
+# hundreds of GB would blow the boot timeout and leave the pod unreachable.
+migrate_models_dir() {
+    local models="$1" size_mb moved missing=0 f rel
+
+    if [[ "$MIGRATE_MODE" == "never" ]]; then
+        log "WARNING: EVERGREEN_MIGRATE_MODELS=never — $models stays on the local volume"
+        return 1
+    fi
+
+    size_mb="$(du -sm "$models" 2>/dev/null | awk '{print $1}')"
+    size_mb="${size_mb:-0}"
+
+    if [[ "$MIGRATE_MODE" != "always" && "$size_mb" -gt "$MIGRATE_LIMIT_MB" ]]; then
+        log "WARNING: $models holds ${size_mb} MB, over the ${MIGRATE_LIMIT_MB} MB auto-migrate limit."
+        log "WARNING: copy it to $MODELS_TARGET yourself and restart, or set"
+        log "WARNING: EVERGREEN_MIGRATE_MODELS=always to migrate it at boot regardless."
+        return 1
+    fi
+
+    log "Migrating ${size_mb} MB of models to $MODELS_TARGET (one time)"
+    if ! cp -r "$models/." "$MODELS_TARGET/"; then
+        log "WARNING: migration copy failed — leaving models on the local volume"
+        return 1
+    fi
+
+    # Drop the local tree only once every file is readable at the target:
+    # on object storage a copy can report success per-file and still leave
+    # something behind, and the original is the only copy we have.
     while IFS= read -r -d '' f; do
-        rel="${f#"$dir"/}"
-        [[ -e "$BAKED_DIR/models/$rel" ]] || return 1
-    done < <(find "$dir" -type f -print0 2>/dev/null)
+        rel="${f#"$models"/}"
+        [[ -s "$MODELS_TARGET/$rel" ]] || { missing=1; log "WARNING: not migrated: $rel"; }
+    done < <(find "$models" -type f -size +0 -print0 2>/dev/null)
+    if [[ "$missing" == "1" ]]; then
+        log "WARNING: migration incomplete — leaving models on the local volume"
+        return 1
+    fi
+
+    moved="${models}.pre-global"
+    rm -rf "$moved"
+    mv "$models" "$moved" || {
+        log "WARNING: could not set the old models tree aside"
+        return 1
+    }
+    log "Old tree kept at $moved — delete it to free space on the network volume"
 }
 
 # /start.sh provisions a missing $COMFYUI_DIR with `cp -r` and then goes
@@ -125,22 +181,33 @@ link_models() {
     fi
 
     if [[ -L "$models" ]]; then
-        if [[ "$(readlink "$models")" == "$MODELS_TARGET" ]]; then
-            log "models -> $MODELS_TARGET"
-        else
-            log "models: re-pointing $(readlink "$models") -> $MODELS_TARGET"
+        local current
+        current="$(readlink "$models")"
+        if [[ "$current" != "$MODELS_TARGET" ]]; then
+            log "models: re-pointing $current -> $MODELS_TARGET"
             ln -sfn "$MODELS_TARGET" "$models"
+        fi
+        # A dangling link is the nastiest failure mode here: ComfyUI's
+        # recursive_search() returns an empty list for a path that is not a
+        # directory, so every model picker is simply empty, with no error.
+        if [[ -d "$models/" ]]; then
+            log "models -> $MODELS_TARGET ($(ls -A "$MODELS_TARGET" 2>/dev/null | wc -l | tr -d ' ') entries)"
+        else
+            log "WARNING: models -> $MODELS_TARGET is DANGLING."
+            log "WARNING: ComfyUI will show empty model lists and report no error."
         fi
         return 0
     fi
 
+    # `ln -s <target> .` run from inside models/ creates models/models, which
+    # ComfyUI never looks at. Clear it so it cannot shadow a real migration.
+    if [[ -L "$models/models" ]]; then
+        log "Removing stray $models/models symlink"
+        rm -f "$models/models"
+    fi
+
     if [[ -d "$models" ]]; then
-        if ! models_dir_is_pristine "$models"; then
-            log "WARNING: $models holds model files — leaving it on the local volume."
-            log "WARNING: move them to $MODELS_TARGET and restart to use the global volume."
-            return 0
-        fi
-        rm -rf "$models"
+        migrate_models_dir "$models" || return 0
     fi
 
     ln -sfn "$MODELS_TARGET" "$models" && log "models -> $MODELS_TARGET (global volume)"

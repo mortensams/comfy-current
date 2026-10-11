@@ -96,12 +96,39 @@ comfortable.
 Safeguards, all best-effort and non-fatal:
 
 - No global volume attached → models stay on the network volume, pod boots
-  normally.
-- An existing `models/` holding real files is **never** migrated (it can be
-  hundreds of GB); the boot logs a warning and leaves it local. Move it to
-  `/workspace-global/models` yourself and restart.
+  normally. The wrapper waits up to `EVERGREEN_MODELS_WAIT` seconds
+  (default 20) for the mount, since it can lag container start.
+- An existing `models/` is **migrated** to the global volume on the next
+  boot, then replaced by the link. This matters because custom nodes
+  populate `models/` on the very first boot — Impact Pack's `install.py`
+  alone downloads ~500 MB of SAM and ultralytics weights — so a rule of
+  "only link an empty tree" would never fire in practice. The old tree is
+  renamed to `models.pre-global` rather than deleted; remove it yourself to
+  reclaim the space.
+- Trees over `EVERGREEN_MIGRATE_LIMIT_MB` (default 5120) are **not**
+  migrated — copying hundreds of GB would blow the boot timeout and leave
+  the pod unreachable. The boot warns and leaves them local. Set
+  `EVERGREEN_MIGRATE_MODELS=always` to migrate regardless, or `never` to
+  disable migration.
+- A **dangling** link is logged as a loud warning. This is the nastiest
+  failure mode on this storage: ComfyUI's `recursive_search()` returns an
+  empty list for a path that isn't a directory, so every model picker goes
+  silently empty with no error anywhere.
 - `EVERGREEN_MODELS_DIR` overrides the target path; `none` disables the
   linking entirely.
+
+> **Adding models? Restart ComfyUI — pressing "R" is not enough.**
+> `folder_paths.py` invalidates its filename cache purely by comparing
+> `os.path.getmtime()` on each model folder. Object-backed storage reports
+> synthetic directory mtimes that often don't change when files appear
+> beneath them, so the cache goes stale and never notices. `/object_info`
+> (what "R" calls) runs inside `with folder_paths.cache_helper:`, which
+> caches harder, not less.
+
+> **Don't hand-create the link with `ln -s /workspace-global/models .`** —
+> run from inside `models/` that creates `models/models`, which ComfyUI
+> never reads, and your pickers stay empty. The wrapper now detects and
+> removes a stray `models/models` link.
 
 > Models that custom nodes fetch at runtime via Hugging Face (e.g. QwenVL)
 > still land in `~/.cache/huggingface` on container disk and are lost with
