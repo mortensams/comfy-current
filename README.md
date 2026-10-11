@@ -80,13 +80,36 @@ So split the two:
 | `models/` | **global volume** at `/workspace-global` | large, written rarely, read often — the workload global volumes are for |
 
 A global volume cannot be mounted *inside* the network volume's tree, so
-`start-evergreen.sh` bridges them with a symlink:
-`/workspace/runpod-slim/ComfyUI/models` → `/workspace-global/models`. The
-link is created during first-boot provisioning (before `/start.sh` can
-launch ComfyUI) and re-checked on every later boot. RunPod's bundle upgrade
-is `rsync --exclude="/models"`, so it never clobbers the link.
+the two are bridged with ComfyUI's own `extra_model_paths.yaml`, which
+`start-evergreen.sh` generates on every boot:
 
-The network volume only holds the installation, not the weights — 50 GB is
+```yaml
+runpod_global:
+    base_path: /workspace-global/models
+    checkpoints: checkpoints
+    loras: loras
+    ...
+```
+
+ComfyUI auto-loads that file from its root directory at startup, so every
+category on the global volume is searched **in addition to** the local
+`models/` tree. Nothing is moved and nothing is linked.
+
+> **Why not a symlink at `models/`?** It cannot survive. ComfyUI
+> git-tracks 36 files under `models/` (the `put_*_here` placeholders and
+> `models/configs/*.yaml`), so the `git checkout -f` in this script's own
+> core update deletes any symlink there and restores a real directory —
+> silently, on every boot. `extra_model_paths.yaml` is immune: git never
+> touches it because it is untracked, and RunPod's bundle upgrade excludes
+> it by name (`rsync --exclude="/extra_model_paths.yaml"`).
+
+Node auto-downloads (Impact Pack's ~500 MB of SAM and ultralytics weights)
+keep going to the local `models/` on the fast POSIX network volume, because
+the generated config deliberately does **not** set `is_default`. Your
+curated weights are read from the global volume. A model present in both
+places is listed once — ComfyUI de-duplicates by relative name.
+
+The network volume only holds the installation, not your weights — 50 GB is
 comfortable.
 
 > **Leave the global volume's mount path at its default.** If you edit that
@@ -95,27 +118,13 @@ comfortable.
 
 Safeguards, all best-effort and non-fatal:
 
-- No global volume attached → models stay on the network volume, pod boots
-  normally. The wrapper waits up to `EVERGREEN_MODELS_WAIT` seconds
-  (default 20) for the mount, since it can lag container start.
-- An existing `models/` is **migrated** to the global volume on the next
-  boot, then replaced by the link. This matters because custom nodes
-  populate `models/` on the very first boot — Impact Pack's `install.py`
-  alone downloads ~500 MB of SAM and ultralytics weights — so a rule of
-  "only link an empty tree" would never fire in practice. The old tree is
-  renamed to `models.pre-global` rather than deleted; remove it yourself to
-  reclaim the space.
-- Trees over `EVERGREEN_MIGRATE_LIMIT_MB` (default 5120) are **not**
-  migrated — copying hundreds of GB would blow the boot timeout and leave
-  the pod unreachable. The boot warns and leaves them local. Set
-  `EVERGREEN_MIGRATE_MODELS=always` to migrate regardless, or `never` to
-  disable migration.
-- A **dangling** link is logged as a loud warning. This is the nastiest
-  failure mode on this storage: ComfyUI's `recursive_search()` returns an
-  empty list for a path that isn't a directory, so every model picker goes
-  silently empty with no error anywhere.
-- `EVERGREEN_MODELS_DIR` overrides the target path; `none` disables the
-  linking entirely.
+- No global volume attached → the yaml is not written at all and the pod
+  boots on local models. The wrapper waits up to `EVERGREEN_MODELS_WAIT`
+  seconds (default 20) for the mount, since it can lag container start.
+- A `models/` symlink left over from an earlier version of this script is
+  removed, and so is a stray `models/models` (see below).
+- `EVERGREEN_MODELS_DIR` overrides the global models path; `none` stops the
+  script managing `extra_model_paths.yaml` entirely.
 
 > **Adding models? Restart ComfyUI — pressing "R" is not enough.**
 > `folder_paths.py` invalidates its filename cache purely by comparing
@@ -125,10 +134,10 @@ Safeguards, all best-effort and non-fatal:
 > (what "R" calls) runs inside `with folder_paths.cache_helper:`, which
 > caches harder, not less.
 
-> **Don't hand-create the link with `ln -s /workspace-global/models .`** —
+> **Don't hand-create a link with `ln -s /workspace-global/models .`** —
 > run from inside `models/` that creates `models/models`, which ComfyUI
-> never reads, and your pickers stay empty. The wrapper now detects and
-> removes a stray `models/models` link.
+> never reads, so your pickers stay empty. The wrapper detects and removes
+> a stray `models/models` link.
 
 > Models that custom nodes fetch at runtime via Hugging Face (e.g. QwenVL)
 > still land in `~/.cache/huggingface` on container disk and are lost with

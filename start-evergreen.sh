@@ -22,9 +22,7 @@
 # Escape hatches (pod env):
 #   EVERGREEN_SKIP_UPDATE=1  boot whatever is on the volume, untouched
 #   EVERGREEN_INSTALL_DEPS   changed (default) | always | never
-#   EVERGREEN_MODELS_DIR     where models live; 'none' keeps them local
-#   EVERGREEN_MIGRATE_MODELS auto (default) | always | never
-#   EVERGREEN_MIGRATE_LIMIT_MB  auto-migrate ceiling, default 5120
+#   EVERGREEN_MODELS_DIR     global-volume models dir; 'none' to not manage
 #   EVERGREEN_MODELS_WAIT    seconds to wait for the mount, default 20
 
 COMFYUI_DIR=/workspace/runpod-slim/ComfyUI
@@ -36,8 +34,6 @@ ROLLBACK_FILE=/workspace/runpod-slim/comfyui-previous-commit.txt
 STATE_DIR=/workspace/runpod-slim/.evergreen-state
 BUILD_ID_FILE=/opt/evergreen-build-id
 MODELS_TARGET="${EVERGREEN_MODELS_DIR:-/workspace-global/models}"
-MIGRATE_MODE="${EVERGREEN_MIGRATE_MODELS:-auto}"
-MIGRATE_LIMIT_MB="${EVERGREEN_MIGRATE_LIMIT_MB:-5120}"
 MODELS_WAIT="${EVERGREEN_MODELS_WAIT:-20}"
 
 log() { echo "[evergreen] $*"; }
@@ -58,8 +54,18 @@ hand_off() {
 # installation stays on the network volume at /workspace. Only models --
 # large, written rarely, read often -- belong on the global volume, which
 # the deploy flow mounts at /workspace-global whenever a network volume is
-# attached as well. RunPod cannot mount one volume inside another's tree,
-# so ComfyUI's models/ becomes a symlink pointing across to it.
+# attached as well.
+#
+# ComfyUI's models/ must NOT be a symlink to it. ComfyUI git-tracks 36
+# files under models/ (the put_*_here placeholders, models/configs/*.yaml),
+# so the `git checkout -f` in our own core update below deletes any symlink
+# there and restores a real directory -- silently, on every single boot.
+# extra_model_paths.yaml is immune: ComfyUI auto-loads it from its root
+# (main.py calls load_extra_path_config on it at startup), git never
+# touches it because it is untracked, and /start.sh's bundle rsync excludes
+# it by name. The local models/ dir then stays exactly as ComfyUI ships it
+# and the global volume is searched in addition to it -- no moving, no
+# linking, nothing to clobber.
 
 prepare_models_target() {
     [[ -n "$MODELS_TARGET" && "$MODELS_TARGET" != "none" ]] || return 1
@@ -67,7 +73,7 @@ prepare_models_target() {
     # The mount point itself must already exist; mkdir would otherwise
     # happily create the "global volume" on the local disk. The mount can
     # lag container start, so give it a moment rather than silently
-    # falling back to local models for the whole session.
+    # falling back to local-only models for the whole session.
     local mount_point waited=0
     mount_point="$(dirname "$MODELS_TARGET")"
     while [[ ! -d "$mount_point" && "$waited" -lt "$MODELS_WAIT" ]]; do
@@ -78,78 +84,95 @@ prepare_models_target() {
     [[ -d "$mount_point" ]] || return 1
     mkdir -p "$MODELS_TARGET" 2>/dev/null || return 1
 
-    # Seed an empty volume with the configs and put_*_here placeholders the
-    # image ships, so a linked tree looks like a normal ComfyUI models dir.
-    # Only when empty: directory walks on object storage cost requests.
+    # Give an empty volume the standard category directories so it looks
+    # like a models tree and the generated yaml has something to list.
+    # Directories only -- copying the shipped configs/*.yaml across would
+    # just duplicate files the local tree already has.
     if [[ -z "$(ls -A "$MODELS_TARGET" 2>/dev/null)" ]]; then
-        log "Seeding $MODELS_TARGET from the baked models skeleton"
-        cp -r "$BAKED_DIR/models/." "$MODELS_TARGET/" 2>/dev/null || true
+        log "Creating the model category directories on $MODELS_TARGET"
+        local d
+        for d in "$BAKED_DIR"/models/*/; do
+            [[ -d "$d" ]] && mkdir -p "$MODELS_TARGET/$(basename "$d")" 2>/dev/null
+        done
     fi
+    return 0
 }
 
-# Move an existing local models tree onto the global volume so the symlink
-# can take over. Custom nodes populate models/ on the very first boot --
-# Impact Pack's install.py alone pulls ~500 MB of SAM and ultralytics
-# weights -- so refusing to touch a non-empty tree would mean the link
-# never gets made in practice. Large trees are still refused: copying
-# hundreds of GB would blow the boot timeout and leave the pod unreachable.
-migrate_models_dir() {
-    local models="$1" size_mb moved missing=0 f rel
+# Generate extra_model_paths.yaml listing every model category on the
+# global volume. Deliberately NOT is_default: node auto-downloads keep
+# going to the local (fast, POSIX) network volume, while curated weights
+# are read from the global one. ComfyUI de-duplicates by relative name, so
+# a model present in both places is listed once.
+write_extra_model_paths() {
+    local root="$1"
+    local yaml="$root/extra_model_paths.yaml"
+    local tmp="${yaml}.evergreen.$$"
+    local cats name
 
-    if [[ "$MIGRATE_MODE" == "never" ]]; then
-        log "WARNING: EVERGREEN_MIGRATE_MODELS=never — $models stays on the local volume"
+    cats="$(
+        for d in "$BAKED_DIR"/models/*/ "$MODELS_TARGET"/*/; do
+            [[ -d "$d" ]] && basename "$d"
+        done | sort -u
+    )"
+    if [[ -z "$cats" ]]; then
+        log "WARNING: no model categories found under $MODELS_TARGET"
         return 1
     fi
 
-    size_mb="$(du -sm "$models" 2>/dev/null | awk '{print $1}')"
-    size_mb="${size_mb:-0}"
-
-    if [[ "$MIGRATE_MODE" != "always" && "$size_mb" -gt "$MIGRATE_LIMIT_MB" ]]; then
-        log "WARNING: $models holds ${size_mb} MB, over the ${MIGRATE_LIMIT_MB} MB auto-migrate limit."
-        log "WARNING: copy it to $MODELS_TARGET yourself and restart, or set"
-        log "WARNING: EVERGREEN_MIGRATE_MODELS=always to migrate it at boot regardless."
-        return 1
-    fi
-
-    log "Migrating ${size_mb} MB of models to $MODELS_TARGET (one time)"
-    if ! cp -r "$models/." "$MODELS_TARGET/"; then
-        log "WARNING: migration copy failed — leaving models on the local volume"
-        return 1
-    fi
-
-    # Drop the local tree only once every file is readable at the target:
-    # on object storage a copy can report success per-file and still leave
-    # something behind, and the original is the only copy we have.
-    while IFS= read -r -d '' f; do
-        rel="${f#"$models"/}"
-        [[ -s "$MODELS_TARGET/$rel" ]] || { missing=1; log "WARNING: not migrated: $rel"; }
-    done < <(find "$models" -type f -size +0 -print0 2>/dev/null)
-    if [[ "$missing" == "1" ]]; then
-        log "WARNING: migration incomplete — leaving models on the local volume"
-        return 1
-    fi
-
-    moved="${models}.pre-global"
-    rm -rf "$moved"
-    mv "$models" "$moved" || {
-        log "WARNING: could not set the old models tree aside"
+    {
+        echo "# Generated by start-evergreen.sh on every boot -- do not edit,"
+        echo "# your changes are overwritten. Set EVERGREEN_MODELS_DIR=none"
+        echo "# to stop managing this file."
+        echo "runpod_global:"
+        echo "    base_path: $MODELS_TARGET"
+        while IFS= read -r name; do
+            [[ -n "$name" ]] && echo "    $name: $name"
+        done <<< "$cats"
+    } > "$tmp" 2>/dev/null || {
+        log "WARNING: could not write $tmp — models stay local-only"
+        rm -f "$tmp"
         return 1
     }
-    log "Old tree kept at $moved — delete it to free space on the network volume"
+
+    mv "$tmp" "$yaml" 2>/dev/null || {
+        log "WARNING: could not install $yaml — models stay local-only"
+        rm -f "$tmp"
+        return 1
+    }
+    log "extra_model_paths.yaml -> $MODELS_TARGET ($(wc -l <<< "$cats" | tr -d ' ') categories)"
+}
+
+# Undo the symlink earlier versions of this script created at models/.
+# The core update's `git checkout -f` destroys it anyway; leaving it would
+# also list every model twice, once through the link and once via the yaml.
+clear_legacy_models_link() {
+    local models="$COMFYUI_DIR/models"
+    if [[ -L "$models" ]]; then
+        log "Removing legacy models symlink (git restores a real directory anyway)"
+        rm -f "$models"
+        mkdir -p "$models"
+    fi
+    # `ln -s <target> .` run from inside models/ creates models/models,
+    # which ComfyUI never reads. Clear it so it cannot cause confusion.
+    if [[ -L "$models/models" ]]; then
+        log "Removing stray $models/models symlink"
+        rm -f "$models/models"
+    fi
 }
 
 # /start.sh provisions a missing $COMFYUI_DIR with `cp -r` and then goes
-# straight on to launch ComfyUI -- we never get control in between. So when
-# the models link is wanted, do that copy here instead, with the symlink
-# already in it. /start.sh then finds the directory present and skips its
-# own copy; its separate venv check (start.sh:344) still runs, and its
-# bundle rsync excludes /models, so the link survives later upgrades.
-provision_with_model_link() {
+# straight on to launch ComfyUI -- we never get control in between, so the
+# yaml would not exist for the first run. Do that copy here instead, with
+# the yaml already in it. /start.sh then finds the directory present and
+# skips its own copy; its separate venv check (start.sh:344) still runs.
+# Note /start.sh never creates $COMFYUI_DIR's parent, so a genuinely empty
+# volume breaks its `cp -r`; the mkdir -p below also covers that.
+provision_with_global_models() {
     [[ -d "$COMFYUI_DIR" ]] && return 0
     prepare_models_target || return 0
 
     local staged="${COMFYUI_DIR}.provisioning.$$"
-    log "First boot: provisioning $COMFYUI_DIR with models on the global volume"
+    log "First boot: provisioning $COMFYUI_DIR"
     mkdir -p "$(dirname "$COMFYUI_DIR")" || return 0
     rm -rf "$staged"
     # Staged, then moved into place: a half-finished copy at $COMFYUI_DIR
@@ -159,64 +182,31 @@ provision_with_model_link() {
         rm -rf "$staged"
         return 0
     fi
-    rm -rf "$staged/models"
-    ln -sfn "$MODELS_TARGET" "$staged/models"
+    write_extra_model_paths "$staged"
     mv "$staged" "$COMFYUI_DIR" || {
         log "WARNING: could not move the staged install into place"
         rm -rf "$staged"
     }
 }
 
-link_models() {
-    [[ -d "$COMFYUI_DIR" ]] || return 0
-    local models="$COMFYUI_DIR/models"
-
+wire_global_models() {
     if ! prepare_models_target; then
         if [[ "$MODELS_TARGET" == "none" ]]; then
-            log "EVERGREEN_MODELS_DIR=none — models stay on the local volume"
+            log "EVERGREEN_MODELS_DIR=none — not managing extra_model_paths.yaml"
         else
             log "No global volume at $(dirname "$MODELS_TARGET") — models stay on the local volume"
         fi
         return 0
     fi
-
-    if [[ -L "$models" ]]; then
-        local current
-        current="$(readlink "$models")"
-        if [[ "$current" != "$MODELS_TARGET" ]]; then
-            log "models: re-pointing $current -> $MODELS_TARGET"
-            ln -sfn "$MODELS_TARGET" "$models"
-        fi
-        # A dangling link is the nastiest failure mode here: ComfyUI's
-        # recursive_search() returns an empty list for a path that is not a
-        # directory, so every model picker is simply empty, with no error.
-        if [[ -d "$models/" ]]; then
-            log "models -> $MODELS_TARGET ($(ls -A "$MODELS_TARGET" 2>/dev/null | wc -l | tr -d ' ') entries)"
-        else
-            log "WARNING: models -> $MODELS_TARGET is DANGLING."
-            log "WARNING: ComfyUI will show empty model lists and report no error."
-        fi
-        return 0
-    fi
-
-    # `ln -s <target> .` run from inside models/ creates models/models, which
-    # ComfyUI never looks at. Clear it so it cannot shadow a real migration.
-    if [[ -L "$models/models" ]]; then
-        log "Removing stray $models/models symlink"
-        rm -f "$models/models"
-    fi
-
-    if [[ -d "$models" ]]; then
-        migrate_models_dir "$models" || return 0
-    fi
-
-    ln -sfn "$MODELS_TARGET" "$models" && log "models -> $MODELS_TARGET (global volume)"
+    [[ -d "$COMFYUI_DIR" ]] || return 0
+    clear_legacy_models_link
+    write_extra_model_paths "$COMFYUI_DIR"
 }
 
 # Both run before the skip-update escape hatch: a pod whose models live on
 # the global volume must find them there even when updates are turned off.
-provision_with_model_link
-link_models
+provision_with_global_models
+wire_global_models
 
 if [[ "${EVERGREEN_SKIP_UPDATE:-0}" == "1" ]]; then
     log "EVERGREEN_SKIP_UPDATE=1 — skipping all updates"
