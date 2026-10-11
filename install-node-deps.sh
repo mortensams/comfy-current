@@ -18,12 +18,11 @@ if python3 -m pip install --no-cache-dir -r "$req"; then
 fi
 
 echo "Retrying $(basename "$dir") deps: plain packages, then source builds without build isolation"
+status=0
 filtered="$(mktemp)"
 grep -vE '^[[:space:]]*git\+' "$req" > "$filtered" || true
-python3 -m pip install --no-cache-dir -r "$filtered" || true
+python3 -m pip install --no-cache-dir -r "$filtered" || status=1
 rm -f "$filtered"
-
-status=0
 while IFS= read -r line; do
     python3 -m pip install --no-cache-dir --no-build-isolation "$line" || status=1
 done < <(grep -E '^[[:space:]]*git\+' "$req")

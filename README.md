@@ -38,10 +38,22 @@ so a network volume goes stale. This image replaces the entrypoint with
 1. On the volume's **first boot**: does nothing — `/start.sh` provisions the
    baked copy (fresh from this image's weekly build).
 2. On **every later boot**: activates the existing venv, force-updates the
-   ComfyUI checkout to upstream `master`, syncs `requirements.txt` (with
-   RunPod's pip constraints so the CUDA-matched torch stack is never
-   touched), clones any missing default nodes, force-updates the existing
-   ones, then `exec /start.sh`.
+   ComfyUI checkout to upstream `master`, clones any missing default nodes,
+   force-updates the existing ones, then `exec /start.sh`.
+
+Dependency work is skipped when nothing relevant changed. After each
+successful `pip install` / `install.py` run, a fingerprint of its inputs —
+the repo's `requirements.txt` (or `install.py`) content, RunPod's pip
+constraints file, and the image build ID — is stored under
+`/workspace/runpod-slim/.evergreen-state/`. On later boots a matching
+fingerprint skips that step entirely, so a typical restart is just a set of
+`git fetch`es (seconds) instead of minutes of pip resolution. New upstream
+commits that don't touch `requirements.txt` update the code and still skip
+pip; a new weekly image (new torch stack / system site-packages) changes
+the build ID and forces one full re-sync. Failed installs never write a
+fingerprint, so they retry on the next boot. Control this with the pod env
+var `EVERGREEN_INSTALL_DEPS`: `changed` (default), `always` (old behavior,
+pip every boot), or `never`.
 
 Every update step is best-effort: if GitHub or PyPI is unreachable, or an
 update fails, the pod still boots the existing installation — SSH, Jupyter,
@@ -49,6 +61,52 @@ FileBrowser and ComfyUI stay reachable. The previous ComfyUI commit is saved
 to `/workspace/runpod-slim/comfyui-previous-commit.txt` for manual rollback.
 
 Set the pod env var `EVERGREEN_SKIP_UPDATE=1` to boot without updating.
+
+## Storage layout (network volume + global volume)
+
+RunPod's **global volumes are object-backed, not a POSIX filesystem**: per
+[their docs](https://docs.runpod.io/storage/globalvolume/overview) they
+*"do not support file locking, atomic rename, or hard links"* and
+*"cannot set file permission bits"*. A git checkout, a venv and pip all
+depend on exactly those, so **the ComfyUI installation can never live on a
+global volume** — `git` fails on `.git/config.lock` and `index.lock`, and
+the venv's `bin/` scripts never get their exec bit.
+
+So split the two:
+
+| What | Where | Why |
+|---|---|---|
+| ComfyUI, venv, custom nodes, `user/`, `output/` | **network volume** at `/workspace` | needs real POSIX semantics; keeps deps across pods |
+| `models/` | **global volume** at `/workspace-global` | large, written rarely, read often — the workload global volumes are for |
+
+A global volume cannot be mounted *inside* the network volume's tree, so
+`start-evergreen.sh` bridges them with a symlink:
+`/workspace/runpod-slim/ComfyUI/models` → `/workspace-global/models`. The
+link is created during first-boot provisioning (before `/start.sh` can
+launch ComfyUI) and re-checked on every later boot. RunPod's bundle upgrade
+is `rsync --exclude="/models"`, so it never clobbers the link.
+
+The network volume only holds the installation, not the weights — 50 GB is
+comfortable.
+
+> **Leave the global volume's mount path at its default.** If you edit that
+> field at deploy time, RunPod reassigns the *network* volume to
+> `/workspace-2`, and every `/workspace/runpod-slim/...` path here breaks.
+
+Safeguards, all best-effort and non-fatal:
+
+- No global volume attached → models stay on the network volume, pod boots
+  normally.
+- An existing `models/` holding real files is **never** migrated (it can be
+  hundreds of GB); the boot logs a warning and leaves it local. Move it to
+  `/workspace-global/models` yourself and restart.
+- `EVERGREEN_MODELS_DIR` overrides the target path; `none` disables the
+  linking entirely.
+
+> Models that custom nodes fetch at runtime via Hugging Face (e.g. QwenVL)
+> still land in `~/.cache/huggingface` on container disk and are lost with
+> the pod. Set `HF_HOME` to a path on the **network** volume — the HF cache
+> uses file locks and symlinked blobs, which a global volume can't provide.
 
 Because SSH/Jupyter only start after the update pass, every phase runs
 under a hard timeout so a slow network volume can never leave the pod
@@ -75,10 +133,14 @@ phase is skipped with a warning and retried on the next boot.
    change only the container image, or create a template from scratch:
    - Container image: `ghcr.io/mortensams/comfy-current:cuda13.0`
    - Volume mount path: `/workspace` (attach your network volume)
+   - Optionally also attach a global volume for models — leave its mount
+     path at the default so it lands on `/workspace-global`
+     (see [Storage layout](#storage-layout-network-volume--global-volume))
    - HTTP ports: `8188` (ComfyUI), `8888` (Jupyter), `8080` (FileBrowser)
    - TCP port: `22` (SSH)
    - Optional env: `JUPYTER_PASSWORD`, `FILEBROWSER_PASSWORD`,
-     `EVERGREEN_SKIP_UPDATE`
+     `EVERGREEN_SKIP_UPDATE`, `EVERGREEN_INSTALL_DEPS`,
+     `EVERGREEN_MODELS_DIR`
 4. Deploy a pod (CUDA 13 targets Blackwell / RTX 5090-class GPUs). The first
    boot provisions the volume; every restart after that lands on the latest
    ComfyUI.

@@ -11,6 +11,7 @@ on:
     paths:
       - Dockerfile
       - start-evergreen.sh
+      - install-node-deps.sh
       - default-nodes.txt
       - .github/workflows/build.yml
 

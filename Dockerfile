@@ -47,6 +47,13 @@ RUN export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt && \
     python3.12 -m pip install --no-cache-dir -r /tmp/comfyui-latest/requirements.txt && \
     rm -rf /tmp/comfyui-latest
 
+# Build ID for the boot-time dependency fingerprints. The venv on the volume
+# sees this image's system site-packages (--system-site-packages), so a new
+# image build must invalidate the volume's skip-markers: the ID is part of
+# every fingerprint, forcing one full dependency re-sync per image update.
+# Placed after the package layers so a cached (= unchanged) image keeps its ID.
+RUN date -u +%Y-%m-%dT%H:%M:%SZ > /opt/evergreen-build-id
+
 COPY start-evergreen.sh /start-evergreen.sh
 RUN chmod +x /start-evergreen.sh
 
