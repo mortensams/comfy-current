@@ -47,6 +47,17 @@ RUN export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt && \
     python3.12 -m pip install --no-cache-dir -r /tmp/comfyui-latest/requirements.txt && \
     rm -rf /tmp/comfyui-latest
 
+# SageAttention: a faster attention kernel than the PyTorch SDPA default on
+# Ada/Hopper cards. The base image ships triton (its only real dependency)
+# but not this, so ComfyUI falls back to "Using pytorch attention". Into
+# system site-packages, which the volume's venv sees via
+# --system-site-packages. Opt in per pod by adding --use-sage-attention to
+# /workspace/runpod-slim/comfyui_args.txt; installing it costs nothing until
+# then. Non-fatal: a broken wheel must never block the image build.
+RUN export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt && \
+    python3.12 -m pip install --no-cache-dir sageattention \
+    || echo "WARNING: sageattention install failed — ComfyUI will use pytorch attention"
+
 # Build ID for the boot-time dependency fingerprints. The venv on the volume
 # sees this image's system site-packages (--system-site-packages), so a new
 # image build must invalidate the volume's skip-markers: the ID is part of
