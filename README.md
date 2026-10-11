@@ -72,12 +72,37 @@ depend on exactly those, so **the ComfyUI installation can never live on a
 global volume** — `git` fails on `.git/config.lock` and `index.lock`, and
 the venv's `bin/` scripts never get their exec bit.
 
-So split the two:
+> **Recommendation: for a single-region ComfyUI pod, use a regional network
+> volume only and skip the global volume.** Measured on a live 4090 pod:
+>
+> | | Global (geesefs/S3) | Regional network volume (MooseFS) |
+> |---|---|---|
+> | Sequential read | 203 MB/s | **725 MB/s** |
+> | Atomic rename | **no** | yes |
+> | Model-dir asset scan | 2.2–3.0s (IO-bound) | ~0.1s |
+>
+> ComfyUI evicts models under VRAM pressure and **re-reads them from disk on
+> every swap**, which is the access pattern object storage handles worst. A
+> 12.5 GB model costs ~60s to load from the global volume versus ~17s from
+> the network volume, and that is paid repeatedly — long enough to block
+> ComfyUI's single-threaded server, which drops the websocket and shows
+> "Reconnecting" / "Fetch timeout" in the browser.
+>
+> The missing atomic rename also corrupts files that are written *next to*
+> models: ComfyUI-Lora-Manager's `.metadata.json` sidecars accumulated a
+> stray trailing byte and failed to parse (`Extra data: line 26 column 2`),
+> recurring across boots.
+>
+> A global volume earns its place only when you genuinely need the **same
+> models in several regions at once**. This image supports that case; it is
+> not the default worth reaching for.
+
+If you do attach both, split them:
 
 | What | Where | Why |
 |---|---|---|
-| ComfyUI, venv, custom nodes, `user/`, `output/` | **network volume** at `/workspace` | needs real POSIX semantics; keeps deps across pods |
-| `models/` | **global volume** at `/workspace-global` | large, written rarely, read often — the workload global volumes are for |
+| ComfyUI, venv, custom nodes, `user/`, `output/`, hot models | **network volume** at `/workspace` | needs real POSIX semantics; fast reads; keeps deps across pods |
+| Bulk / archival models | **global volume** at `/workspace-global` | region-independent, read-mostly, rarely swapped |
 
 A global volume cannot be mounted *inside* the network volume's tree, so
 the two are bridged with ComfyUI's own `extra_model_paths.yaml`, which
